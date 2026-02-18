@@ -1,0 +1,83 @@
+version: '3.8'
+
+services:
+
+  # =========================================================
+  # PRIMARY (MASTER - WRITE)
+  # =========================================================
+  postgres-primary:
+    image: postgres:15-alpine
+    container_name: pg-primary
+    restart: always
+    environment:
+      POSTGRES_USER: quarkus_user
+      POSTGRES_PASSWORD: quarkus_password
+      POSTGRES_DB: quarkus_db
+    command: >
+      postgres
+      -c listen_addresses='*'
+      -c wal_level=replica
+      -c max_wal_senders=10
+      -c max_replication_slots=10
+      -c hot_standby=on
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_primary_data:/var/lib/postgresql/data
+      - ./init-primary.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - quarkus-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U quarkus_user"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+
+  # =========================================================
+  # REPLICA (SLAVE - READ)
+  # =========================================================
+  postgres-replica:
+    image: postgres:15-alpine
+    container_name: pg-replica
+    restart: always
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: replicator_password
+    command: >
+      bash -c "
+      echo 'Aguardando primary...';
+      until pg_isready -h postgres-primary -p 5432 -U replicator; do
+        sleep 2;
+      done;
+
+      if [ ! -s /var/lib/postgresql/data/PG_VERSION ]; then
+        echo 'Executando basebackup...';
+        pg_basebackup -h postgres-primary \
+          -U replicator \
+          -D /var/lib/postgresql/data \
+          -R \
+          --slot=replication_slot_1 \
+          -C \
+          -P;
+      fi;
+
+      echo 'Iniciando replica...';
+      postgres -c hot_standby=on
+      "
+    ports:
+      - "5433:5432"
+    volumes:
+      - pg_replica_data:/var/lib/postgresql/data
+    networks:
+      - quarkus-net
+
+volumes:
+  pg_primary_data:
+  pg_replica_data:
+
+networks:
+  quarkus-net:
+    driver: bridge

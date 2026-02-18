@@ -1,0 +1,93 @@
+{
+  "fonte": {
+    "modelo": "CX750M",
+    "potencia_watts": 750,
+    "certificacao": "80 Plus Bronze",
+    "modular": true,
+    "fabricante": "Corsair"
+  },
+  "placa_mae": {
+    "modelo": "ROG STRIX B550-F GAMING",
+    "fabricante": "ASUS",
+    "socket": "AM4",
+    "chipset": "B550",
+    "formato": "ATX",
+    "slots_ram": 4,
+    "ram_max_gb": 128,
+    "slots_pcie": 3
+  },
+  "placa_video": {
+    "modelo": "GeForce RTX 4070 Ti GAMING X TRIO",
+    "fabricante": "MSI",
+    "chipset": "RTX 4070 Ti",
+    "memoria_gb": 12,
+    "tipo_memoria": "GDDR6X",
+    "clock_mhz": 2610,
+    "tdp_watts": 285,
+    "interface": "PCIe 4.0 x16"
+  },
+  "memoria_ram": {
+    "modulos": [
+      {
+        "modelo": "Vengeance RGB Pro",
+        "fabricante": "Corsair",
+        "capacidade_gb": 16,
+        "tipo": "DDR4",
+        "frequencia_mhz": 3600,
+        "latencia": "CL18"
+      },
+      {
+        "modelo": "Vengeance RGB Pro",
+        "fabricante": "Corsair",
+        "capacidade_gb": 16,
+        "tipo": "DDR4",
+        "frequencia_mhz": 3600,
+        "latencia": "CL18"
+      }
+    ],
+    "capacidade_total_gb": 32
+  },
+  "armazenamento": {
+    "dispositivos": [
+      {
+        "modelo": "980 PRO",
+        "fabricante": "Samsung",
+        "tipo": "NVMe",
+        "capacidade_gb": 1000,
+        "interface": "NVMe PCIe 4.0",
+        "velocidade_leitura_mbps": 7000,
+        "velocidade_escrita_mbps": 5000
+      },
+      {
+        "modelo": "870 EVO",
+        "fabricante": "Samsung",
+        "tipo": "SSD",
+        "capacidade_gb": 2000,
+        "interface": "SATA III",
+        "velocidade_leitura_mbps": 560,
+        "velocidade_escrita_mbps": 530
+      }
+    ],
+    "capacidade_total_gb": 3000
+  },
+  "gabinete": {
+    "modelo": "4000D Airflow",
+    "fabricante": "Corsair",
+    "tipo": "Mid Tower",
+    "cor": "Preto",
+    "material": "Aço com painel de vidro temperado",
+    "tamanho_placa_mae_suportado": "ATX, Micro-ATX, Mini-ITX",
+    "slots_expansao": 7,
+    "baias_35_polegadas": 2,
+    "baias_25_polegadas": 2,
+    "ventilacao": {
+      "coolers_inclusos": 2,
+      "suporte_radiador": "360mm frontal, 280mm superior",
+      "slots_ventilacao_frontal": 3,
+      "slots_ventilacao_superior": 3,
+      "slots_ventilacao_traseira": 1
+    }
+  },
+  "observacoes": "Configuração para jogos em alta resolução e criação de conteúdo. Excelente custo-benefício com possibilidade de upgrades futuros."
+}
+
