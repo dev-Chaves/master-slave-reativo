@@ -20,11 +20,13 @@ services:
       -c max_wal_senders=10
       -c max_replication_slots=10
       -c hot_standby=on
+      -c hba_file=/etc/postgresql/pg_hba.conf
     ports:
       - "5432:5432"
     volumes:
       - pg_primary_data:/var/lib/postgresql/data
-      - ./init-primary.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./src/main/resources/init-primary.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./pg_hba.conf:/etc/postgresql/pg_hba.conf
     networks:
       - quarkus-net
     healthcheck:
@@ -60,7 +62,6 @@ services:
           -D /var/lib/postgresql/data \
           -R \
           --slot=replication_slot_1 \
-          -C \
           -P;
       fi;
 
