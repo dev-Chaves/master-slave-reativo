@@ -13,7 +13,7 @@ public class ComputerEntity extends PanacheEntity {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @Column(length = 40, nullable = false, unique = true)
+    @Column(length = 40, nullable = false)
     private String name;
 
     @Column(columnDefinition = "jsonb")
