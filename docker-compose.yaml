@@ -64,42 +64,48 @@ services:
       retries: 15
 
   # =========================================================
-  # PROMETHEUS
+  # QUARKUS API (JVM MODE)
   # =========================================================
-  prometheus:
-    image: prom/prometheus:latest
-    container_name: prometheus
-    restart: always
-    ports:
-      - "9090:9090"
-    volumes:
-      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
-    networks:
-      - quarkus-net
-
-  # =========================================================
-  # GRAFANA
-  # =========================================================
-  grafana:
-    image: grafana/grafana:latest
-    container_name: grafana
-    restart: always
-    ports:
-      - "3000:3000"
-    environment:
-      GF_SECURITY_ADMIN_PASSWORD: admin
-    volumes:
-      - grafana_data:/var/lib/grafana
-      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+  quarkus-api:
+    build:
+      context: .
+      dockerfile: src/main/docker/Dockerfile.jvm
+    container_name: quarkus-api
+    restart: on-failure
     depends_on:
-      - prometheus
+      postgres-primary:
+        condition: service_healthy
+      postgres-replica:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      # Datasource primário (escrita)
+      QUARKUS_DATASOURCE_REACTIVE_URL: postgresql://pg-primary:5432/quarkus_db
+      QUARKUS_DATASOURCE_USERNAME: quarkus_user
+      QUARKUS_DATASOURCE_PASSWORD: quarkus_password
+      # Datasource réplica (leitura)
+      QUARKUS_DATASOURCE_LEITURA_REACTIVE_URL: postgresql://pg-replica:5432/quarkus_db
+      QUARKUS_DATASOURCE_LEITURA_USERNAME: quarkus_user
+      QUARKUS_DATASOURCE_LEITURA_PASSWORD: quarkus_password
+    deploy:
+      resources:
+        limits:
+          memory: 1024m
+        reservations:
+          memory: 256m
     networks:
       - quarkus-net
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -f http://localhost:8080/q/health/live || exit 1" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
 volumes:
   pg_primary_data:
   pg_replica_data:
-  grafana_data:
 
 
 networks:

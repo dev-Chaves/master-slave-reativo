@@ -1,36 +1,33 @@
 /**
- * Teste de Carga Pesado — master-slave-reativo
- * =============================================
+ * Teste de Carga — master-slave-reativo (Cursor Pagination)
+ * ==========================================================
  * Estratégia em 3 fases:
  *
  *  FASE 1 — Warm-up de Escrita (0s → 60s)
  *    Apenas INSERTs para popular o banco com volume real de dados.
- *    Sem leitura ainda — garante que a réplica tenha dados para servir.
  *
  *  FASE 2 — Paralelo Escrita + Leitura (60s → 3m30s)
- *    Escritas moderadas no master + leituras intensas na réplica em paralelo.
- *    Simula produção real: 20% escrita / 80% leitura.
+ *    Escritas moderadas no master + leituras paginadas na réplica.
+ *    Cada VU mantém seu próprio cursor (createdAt + id).
  *
  *  FASE 3 — Stress de Leitura (3m30s → 5m)
- *    Apenas leituras com volume máximo de VUs para estressar a réplica.
- *    Inclui buscas JSONB complexas.
+ *    300 VUs lendo com paginação cursor + buscas JSONB.
  *
  * Executar:
  *   k6 run k6/load-test.js
- *
- * Com saída para Grafana (k6 Cloud ou k6 OSS com output):
  *   k6 run --out json=k6-results.json k6/load-test.js
  */
 
 import http from "k6/http";
-import { check, group, sleep } from "k6";
-import { Counter, Rate, Trend, Gauge } from "k6/metrics";
+import { check, group } from "k6";
+import { Counter, Rate, Trend } from "k6/metrics";
 import { randomString, randomIntBetween } from "https://jslib.k6.io/k6-utils/1.4.0/index.js";
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
 const BASE_URL = __ENV.BASE_URL || "http://localhost:8080";
 const ENDPOINT = `${BASE_URL}/computer`;
+const PAGE_SIZE = 20; // registros por página — controla o payload por request
 
 // ─── Métricas customizadas ───────────────────────────────────────────────────
 
@@ -41,6 +38,7 @@ const writeErrors = new Counter("write_errors");
 const readErrors = new Counter("read_errors");
 const successRate = new Rate("success_rate");
 const insertedCount = new Counter("inserted_total");
+const paginaVazia = new Counter("pagina_vazia_total"); // cursor chegou ao fim
 
 // ─── Cenários ────────────────────────────────────────────────────────────────
 
@@ -49,15 +47,14 @@ export const options = {
 
         /**
          * FASE 1 — Warm-up de escrita pura.
-         * Popula o banco com dados reais antes de qualquer leitura.
-         * 50 VUs por 60s = ~3.000–5.000 registros inseridos.
+         * Popula o banco antes de qualquer leitura.
          */
         fase1_warmup_escrita: {
             executor: "ramping-vus",
             startVUs: 0,
             stages: [
-                { duration: "10s", target: 50 },   // ramp up rápido
-                { duration: "50s", target: 50 },   // escrita sustentada
+                { duration: "10s", target: 50 },
+                { duration: "50s", target: 50 },
             ],
             exec: "escrever",
             gracefulRampDown: "5s",
@@ -66,7 +63,6 @@ export const options = {
 
         /**
          * FASE 2a — Escrita moderada paralela (começa em 60s).
-         * Mantém fluxo de inserção enquanto leituras sobem.
          */
         fase2a_escrita_paralela: {
             executor: "ramping-vus",
@@ -84,8 +80,8 @@ export const options = {
         },
 
         /**
-         * FASE 2b — Leitura intensa paralela (começa em 60s).
-         * Lê tudo da réplica enquanto o master ainda recebe escritas.
+         * FASE 2b — Leitura paginada paralela (começa em 60s).
+         * Cada VU navega pelas páginas usando cursor.
          */
         fase2b_leitura_paralela: {
             executor: "ramping-vus",
@@ -104,7 +100,7 @@ export const options = {
 
         /**
          * FASE 3 — Stress de leitura pura (começa em 3m30s).
-         * Máximo de VUs lendo da réplica — inclui buscas JSONB pesadas.
+         * Paginação cursor + buscas JSONB pesadas.
          */
         fase3_stress_leitura: {
             executor: "ramping-vus",
@@ -122,7 +118,7 @@ export const options = {
     },
 
     thresholds: {
-        // Leitura: 95% < 300ms mesmo sob stress máximo
+        // Leitura paginada: 95% < 300ms
         "read_latency_ms": ["p(95)<300"],
         "read_latency_ms{fase:stress}": ["p(95)<500"],
         // Escrita: 95% < 800ms
@@ -139,6 +135,32 @@ export const options = {
         "http_req_duration": ["p(99)<1000"],
     },
 };
+
+// ─── Estado de cursor por VU ──────────────────────────────────────────────────
+//
+// Cada VU tem seu próprio cursor independente.
+// Quando a página retorna vazia, o cursor é resetado (volta à primeira página).
+//
+// Formato do cursor: { createdAt: string ISO-8601, id: number }
+// null = primeira página (sem cursor → backend usa LocalDateTime.now())
+
+let cursor = null; // estado por VU (isolado pelo runtime do k6)
+
+function buildPaginationUrl(cursorState) {
+    if (cursorState === null) {
+        // Primeira página — sem cursor, backend usa now() como padrão
+        return `${ENDPOINT}/pagination?limit=${PAGE_SIZE}`;
+    }
+    const encoded = encodeURIComponent(cursorState.createdAt);
+    return `${ENDPOINT}/pagination?createdAt=${encoded}&id=${cursorState.id}&limit=${PAGE_SIZE}`;
+}
+
+function extractCursor(items) {
+    if (!items || items.length === 0) return null;
+    const last = items[items.length - 1];
+    // createdAt vem como string ISO do JSON (ex: "2025-02-18T17:00:00")
+    return { createdAt: last.createdAt, id: last.id };
+}
 
 // ─── Geração de payload ───────────────────────────────────────────────────────
 
@@ -183,8 +205,8 @@ function gerarComputador() {
         placa_mae: {
             modelo: `ROG STRIX ${chipset}-F GAMING WIFI`,
             fabricante: ["ASUS", "MSI", "Gigabyte", "ASRock"][randomIntBetween(0, 3)],
-            socket: socket,
-            chipset: chipset,
+            socket,
+            chipset,
             formato: ["ATX", "Micro-ATX", "E-ATX"][randomIntBetween(0, 2)],
             slots_ram: 4,
             ram_max_gb: 256,
@@ -299,36 +321,47 @@ export function escrever() {
     } else {
         writeErrors.add(1);
     }
-
-    // Sem sleep — máximo throughput de escrita
 }
 
-// ─── Cenário: Leitura simples (réplica) ──────────────────────────────────────
+// ─── Cenário: Leitura paginada (réplica) ─────────────────────────────────────
+//
+// Cada VU navega pelas páginas em sequência usando cursor.
+// Quando a página fica vazia, reseta o cursor (volta ao início).
 
 export function ler() {
+    const url = buildPaginationUrl(cursor);
+
     const start = Date.now();
-    const res = http.get(ENDPOINT, {
-        tags: { operacao: "select_all" },
+    const res = http.get(url, {
+        tags: { operacao: "pagination" },
         timeout: "10s",
     });
     readLatency.add(Date.now() - start);
 
+    let items = null;
     const ok = check(res, {
-        "select: status 200": (r) => r.status === 200,
-        "select: é array": (r) => {
-            try { return Array.isArray(JSON.parse(r.body)); }
-            catch (_) { return false; }
-        },
-        "select: tem dados": (r) => {
-            try { return JSON.parse(r.body).length > 0; }
+        "pagination: status 200": (r) => r.status === 200,
+        "pagination: é array": (r) => {
+            try { items = JSON.parse(r.body); return Array.isArray(items); }
             catch (_) { return false; }
         },
     });
 
     successRate.add(ok);
-    if (!ok) readErrors.add(1);
 
-    // Sem sleep — máximo throughput de leitura
+    if (ok && items !== null) {
+        if (items.length === 0) {
+            // Chegou ao fim — reseta cursor para recomeçar do topo
+            paginaVazia.add(1);
+            cursor = null;
+        } else {
+            // Avança o cursor para a próxima página
+            cursor = extractCursor(items);
+        }
+    } else {
+        readErrors.add(1);
+        cursor = null; // reseta em caso de erro
+    }
 }
 
 // ─── Cenário: Leitura com busca JSONB (réplica) ───────────────────────────────
@@ -337,32 +370,41 @@ const GPU_TERMOS = ["RTX", "RX", "GTX", "4090", "4080", "4070", "3090", "7900", 
 const RAM_VALORES = [16, 32, 64, 128];
 
 export function lerComBusca() {
-    // Alterna entre listagem completa e buscas JSONB
     const tipo = randomIntBetween(0, 2);
 
     if (tipo === 0) {
-        // GET /computer — lista completa (maior volume de dados)
-        group("select_all", () => {
+        // Paginação cursor — mesma lógica do ler()
+        group("pagination", () => {
+            const url = buildPaginationUrl(cursor);
+
             const start = Date.now();
-            const res = http.get(ENDPOINT, {
-                tags: { operacao: "select_all" },
+            const res = http.get(url, {
+                tags: { operacao: "pagination" },
                 timeout: "15s",
             });
             readLatency.add(Date.now() - start);
 
+            let items = null;
             const ok = check(res, {
-                "select_all: 200": (r) => r.status === 200,
-                "select_all: é array": (r) => {
-                    try { return Array.isArray(JSON.parse(r.body)); }
+                "pagination: 200": (r) => r.status === 200,
+                "pagination: é array": (r) => {
+                    try { items = JSON.parse(r.body); return Array.isArray(items); }
                     catch (_) { return false; }
                 },
             });
+
             successRate.add(ok);
-            if (!ok) readErrors.add(1);
+            if (ok && items !== null) {
+                cursor = items.length === 0 ? null : extractCursor(items);
+                if (items.length === 0) paginaVazia.add(1);
+            } else {
+                readErrors.add(1);
+                cursor = null;
+            }
         });
 
     } else if (tipo === 1) {
-        // GET /computer/search/gpu/{termo} — busca JSONB por GPU
+        // Busca JSONB por GPU
         group("search_gpu", () => {
             const termo = GPU_TERMOS[randomIntBetween(0, GPU_TERMOS.length - 1)];
             const start = Date.now();
@@ -384,7 +426,7 @@ export function lerComBusca() {
         });
 
     } else {
-        // GET /computer/search/ram/{capacidade} — busca JSONB por RAM
+        // Busca JSONB por RAM
         group("search_ram", () => {
             const cap = RAM_VALORES[randomIntBetween(0, RAM_VALORES.length - 1)];
             const start = Date.now();
@@ -405,6 +447,4 @@ export function lerComBusca() {
             if (!ok) readErrors.add(1);
         });
     }
-
-    // Sem sleep — máximo throughput
 }

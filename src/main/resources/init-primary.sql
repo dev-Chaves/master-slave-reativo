@@ -12,5 +12,10 @@ CREATE TABLE IF NOT EXISTS computers (
     id          BIGSERIAL PRIMARY KEY,
     name        VARCHAR(40) NOT NULL,
     description JSONB,
-    price       NUMERIC(10, 2)
+    price       NUMERIC(10, 2),
+    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE INDEX idx_created_at ON computers(created_at);
+
+CREATE INDEX idx_computers_description ON computers USING gin (description);

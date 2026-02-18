@@ -17,6 +17,7 @@ public class ComputerRowMapper {
         entity.name = row.getString("name");
         entity.price = row.getBigDecimal("price");
         entity.description = row.getString("description");
+        entity.createdAt = row.getLocalDateTime("created_at");
         return entity;
     }
 

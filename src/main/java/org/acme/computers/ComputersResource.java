@@ -10,6 +10,7 @@ import org.acme.computers.service.ComputerReadService;
 import org.acme.computers.service.ComputerWriteService;
 import org.jboss.resteasy.reactive.RestResponse;
 
+import java.time.LocalDateTime;
 import java.util.List;
 
 @Path("computer")
@@ -25,11 +26,23 @@ public class ComputersResource {
     ComputerWriteService writeService;
 
     /**
+     * Deprecated
      * Lista todos os computadores — leitura via RÉPLICA (slave).
      */
+    // @Deprecated
+    // @GET
+    // public Uni<List<ComputerEntity>> getAll() {
+    // return readService.findAll();
+    // }
+
+    /**
+     * Lista computadores em ordem decrescente de criação, com paginação.
+     */
     @GET
-    public Uni<List<ComputerEntity>> getAll() {
-        return readService.findAll();
+    @Path("pagination")
+    public Uni<List<ComputerEntity>> pagination(@QueryParam("createdAt") LocalDateTime createdAt,
+            @QueryParam("id") Long id, @QueryParam("limit") int limit) {
+        return readService.pagination(createdAt, id, limit);
     }
 
     /**

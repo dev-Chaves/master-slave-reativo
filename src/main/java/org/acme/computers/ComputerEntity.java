@@ -4,6 +4,7 @@ import io.quarkus.hibernate.reactive.panache.PanacheEntity;
 import jakarta.persistence.*;
 
 import java.math.BigDecimal;
+import java.time.LocalDateTime;
 
 @Entity
 @Table(name = "computers")
@@ -18,6 +19,9 @@ public class ComputerEntity extends PanacheEntity {
     public String description;
 
     public BigDecimal price;
+
+    @Column(name = "created_at")
+    public LocalDateTime createdAt;
 
     public ComputerEntity() {
     }
