@@ -13,10 +13,10 @@ public class ComputerRowMapper {
 
     public ComputerEntity mapRow(Row row) {
         ComputerEntity entity = new ComputerEntity();
-        entity.setId(row.getLong("id"));
-        entity.setName(row.getString("name"));
-        entity.setPrice(row.getBigDecimal("price"));
-        entity.setDescription(row.getString("description"));
+        entity.id = row.getLong("id"); // campo público herdado de PanacheEntity
+        entity.name = row.getString("name");
+        entity.price = row.getBigDecimal("price");
+        entity.description = row.getString("description");
         return entity;
     }
 
@@ -28,4 +28,3 @@ public class ComputerRowMapper {
         return computers;
     }
 }
-

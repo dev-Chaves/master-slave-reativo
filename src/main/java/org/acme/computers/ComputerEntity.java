@@ -9,28 +9,22 @@ import java.math.BigDecimal;
 @Table(name = "computers")
 public class ComputerEntity extends PanacheEntity {
 
-    @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
-    private Long id;
+    // Nota: 'id' já é fornecido por PanacheEntity — não redeclarar aqui.
 
     @Column(length = 40, nullable = false)
-    private String name;
+    public String name;
 
     @Column(columnDefinition = "jsonb")
-    private String description;
+    public String description;
 
-    private BigDecimal price;
+    public BigDecimal price;
 
     public ComputerEntity() {
     }
 
-    public Long getId() {
-        return id;
-    }
-
-    public void setId(Long id) {
-        this.id = id;
-    }
+    // PanacheEntity usa campos públicos por convenção.
+    // Getters/setters são opcionais, mas mantidos para compatibilidade com o
+    // WriteService.
 
     public String getName() {
         return name;

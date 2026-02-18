@@ -1,12 +1,10 @@
-version: '3.8'
-
 services:
 
   # =========================================================
   # PRIMARY (MASTER - WRITE)
   # =========================================================
   postgres-primary:
-    image: postgres:15-alpine
+    image: postgres:18
     container_name: pg-primary
     restart: always
     environment:
@@ -15,96 +13,94 @@ services:
       POSTGRES_DB: quarkus_db
     command: >
       postgres
-      -c listen_addresses='*'
-      -c wal_level=replica
-      -c max_wal_senders=10
-      -c max_replication_slots=10
-      -c hot_standby=on
-      -c hba_file=/etc/postgresql/pg_hba.conf
+        -c listen_addresses='*'
+        -c wal_level=replica
+        -c max_wal_senders=10
+        -c max_replication_slots=10
+        -c hot_standby=on
+        -c hba_file=/etc/postgresql/pg_hba.conf
     ports:
       - "5432:5432"
     volumes:
-      - pg_primary_data:/var/lib/postgresql/data
-      - ./src/main/resources/init-primary.sql:/docker-entrypoint-initdb.d/init.sql
+      - pg_primary_data:/var/lib/postgresql
+      - ./src/main/resources/init-primary.sql:/docker-entrypoint-initdb.d/01-init.sql
       - ./pg_hba.conf:/etc/postgresql/pg_hba.conf
     networks:
       - quarkus-net
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U quarkus_user"]
+      test: [ "CMD-SHELL", "pg_isready -U quarkus_user -d quarkus_db" ]
       interval: 5s
       timeout: 5s
-      retries: 5
-
+      retries: 10
 
   # =========================================================
   # REPLICA (SLAVE - READ)
   # =========================================================
   postgres-replica:
-    image: postgres:15-alpine
+    image: postgres:18
     container_name: pg-replica
     restart: always
     depends_on:
       postgres-primary:
         condition: service_healthy
     environment:
+      POSTGRES_USER: quarkus_user
+      POSTGRES_PASSWORD: quarkus_password
+      POSTGRES_DB: quarkus_db
       PGPASSWORD: replicator_password
-    command: >
-      bash -c "
-      echo 'Aguardando primary...';
-      until pg_isready -h postgres-primary -p 5432 -U replicator; do
-        sleep 2;
-      done;
-
-      if [ ! -s /var/lib/postgresql/data/PG_VERSION ]; then
-        echo 'Executando basebackup...';
-        pg_basebackup -h postgres-primary \
-          -U replicator \
-          -D /var/lib/postgresql/data \
-          -R \
-          --slot=replication_slot_1 \
-          -P;
-      fi;
-
-      echo 'Iniciando replica...';
-      postgres -c hot_standby=on
-      "
+      PGDATA: /var/lib/postgresql/18/main
+    entrypoint: [ "bash", "/docker-entrypoint-replica.sh" ]
     ports:
       - "5433:5432"
     volumes:
-      - pg_replica_data:/var/lib/postgresql/data
+      - pg_replica_data:/var/lib/postgresql
+      - ./src/main/resources/init-replica.sh:/docker-entrypoint-replica.sh
     networks:
       - quarkus-net
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U quarkus_user -d quarkus_db" ]
+      interval: 5s
+      timeout: 5s
+      retries: 15
 
   # =========================================================
-  # MONITORING (PROMETHEUS & GRAFANA)
+  # PROMETHEUS
   # =========================================================
   prometheus:
     image: prom/prometheus:latest
     container_name: prometheus
-    volumes:
-      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+    restart: always
     ports:
       - "9090:9090"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
     networks:
       - quarkus-net
 
+  # =========================================================
+  # GRAFANA
+  # =========================================================
   grafana:
-    image: grafana/grafana-oss:latest
+    image: grafana/grafana:latest
     container_name: grafana
-    environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
-    volumes:
-      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+    restart: always
     ports:
       - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+    depends_on:
+      - prometheus
     networks:
       - quarkus-net
 
 volumes:
   pg_primary_data:
   pg_replica_data:
+  grafana_data:
+
 
 networks:
   quarkus-net:

@@ -1,371 +1,410 @@
 /**
- * Teste de Carga - master-slave-reativo
- * ======================================
- * Cobre todos os endpoints da API reativa:
- *   POST   /computer              → escrita no master (porta 5432)
- *   GET    /computer              → leitura na réplica (porta 5433)
- *   GET    /computer/search/gpu/{search}
- *   GET    /computer/search/ram/{capacity}
- *   DELETE /computer/{name}
+ * Teste de Carga Pesado — master-slave-reativo
+ * =============================================
+ * Estratégia em 3 fases:
+ *
+ *  FASE 1 — Warm-up de Escrita (0s → 60s)
+ *    Apenas INSERTs para popular o banco com volume real de dados.
+ *    Sem leitura ainda — garante que a réplica tenha dados para servir.
+ *
+ *  FASE 2 — Paralelo Escrita + Leitura (60s → 3m30s)
+ *    Escritas moderadas no master + leituras intensas na réplica em paralelo.
+ *    Simula produção real: 20% escrita / 80% leitura.
+ *
+ *  FASE 3 — Stress de Leitura (3m30s → 5m)
+ *    Apenas leituras com volume máximo de VUs para estressar a réplica.
+ *    Inclui buscas JSONB complexas.
  *
  * Executar:
  *   k6 run k6/load-test.js
  *
- * Sobrescrever a URL base:
- *   k6 run -e BASE_URL=http://meu-servidor:8080 k6/load-test.js
+ * Com saída para Grafana (k6 Cloud ou k6 OSS com output):
+ *   k6 run --out json=k6-results.json k6/load-test.js
  */
 
 import http from "k6/http";
 import { check, group, sleep } from "k6";
-import { Counter, Rate, Trend } from "k6/metrics";
+import { Counter, Rate, Trend, Gauge } from "k6/metrics";
 import { randomString, randomIntBetween } from "https://jslib.k6.io/k6-utils/1.4.0/index.js";
 
-// ─── Configuração ────────────────────────────────────────────────────────────
+// ─── Config ──────────────────────────────────────────────────────────────────
 
 const BASE_URL = __ENV.BASE_URL || "http://localhost:8080";
 const ENDPOINT = `${BASE_URL}/computer`;
 
 // ─── Métricas customizadas ───────────────────────────────────────────────────
 
-const writeErrors = new Counter("write_errors");
-const readErrors = new Counter("read_errors");
-const deleteErrors = new Counter("delete_errors");
 const writeLatency = new Trend("write_latency_ms", true);
 const readLatency = new Trend("read_latency_ms", true);
 const searchLatency = new Trend("search_latency_ms", true);
+const writeErrors = new Counter("write_errors");
+const readErrors = new Counter("read_errors");
 const successRate = new Rate("success_rate");
+const insertedCount = new Counter("inserted_total");
 
-// ─── Cenários / Estágios ─────────────────────────────────────────────────────
+// ─── Cenários ────────────────────────────────────────────────────────────────
 
 export const options = {
     scenarios: {
+
         /**
-         * Leitura intensiva — simula carga típica de produção onde leituras
-         * dominam (80 % do tráfego vai para a réplica slave).
+         * FASE 1 — Warm-up de escrita pura.
+         * Popula o banco com dados reais antes de qualquer leitura.
+         * 50 VUs por 60s = ~3.000–5.000 registros inseridos.
          */
-        leitura_intensa: {
+        fase1_warmup_escrita: {
             executor: "ramping-vus",
             startVUs: 0,
             stages: [
-                { duration: "30s", target: 20 },   // aquecimento
-                { duration: "1m", target: 50 },   // carga sustentada
-                { duration: "30s", target: 100 },  // pico
-                { duration: "30s", target: 50 },   // redução
-                { duration: "30s", target: 0 },    // resfriamento
+                { duration: "10s", target: 50 },   // ramp up rápido
+                { duration: "50s", target: 50 },   // escrita sustentada
             ],
-            exec: "cenarioLeitura",
-            gracefulRampDown: "10s",
+            exec: "escrever",
+            gracefulRampDown: "5s",
+            tags: { fase: "warmup" },
         },
 
         /**
-         * Escrita moderada — simula inserções concorrentes no master.
-         * Inicia 15 s depois para não sobrecarregar o banco no arranque.
+         * FASE 2a — Escrita moderada paralela (começa em 60s).
+         * Mantém fluxo de inserção enquanto leituras sobem.
          */
-        escrita_moderada: {
+        fase2a_escrita_paralela: {
             executor: "ramping-vus",
-            startTime: "15s",
+            startTime: "60s",
             startVUs: 0,
             stages: [
-                { duration: "30s", target: 5 },
-                { duration: "1m", target: 15 },
-                { duration: "30s", target: 5 },
+                { duration: "20s", target: 20 },
+                { duration: "1m", target: 30 },
+                { duration: "30s", target: 20 },
+                { duration: "20s", target: 0 },
+            ],
+            exec: "escrever",
+            gracefulRampDown: "5s",
+            tags: { fase: "paralelo" },
+        },
+
+        /**
+         * FASE 2b — Leitura intensa paralela (começa em 60s).
+         * Lê tudo da réplica enquanto o master ainda recebe escritas.
+         */
+        fase2b_leitura_paralela: {
+            executor: "ramping-vus",
+            startTime: "60s",
+            startVUs: 0,
+            stages: [
+                { duration: "20s", target: 50 },
+                { duration: "1m", target: 100 },
+                { duration: "30s", target: 150 },
+                { duration: "20s", target: 0 },
+            ],
+            exec: "ler",
+            gracefulRampDown: "5s",
+            tags: { fase: "paralelo" },
+        },
+
+        /**
+         * FASE 3 — Stress de leitura pura (começa em 3m30s).
+         * Máximo de VUs lendo da réplica — inclui buscas JSONB pesadas.
+         */
+        fase3_stress_leitura: {
+            executor: "ramping-vus",
+            startTime: "210s",
+            startVUs: 0,
+            stages: [
+                { duration: "20s", target: 200 },
+                { duration: "1m", target: 300 },
                 { duration: "30s", target: 0 },
             ],
-            exec: "cenarioEscrita",
+            exec: "lerComBusca",
             gracefulRampDown: "10s",
-        },
-
-        /**
-         * Busca por GPU/RAM — consultas JSONB na réplica.
-         */
-        busca_avancada: {
-            executor: "constant-vus",
-            startTime: "30s",
-            vus: 10,
-            duration: "2m",
-            exec: "cenarioBusca",
+            tags: { fase: "stress" },
         },
     },
 
     thresholds: {
-        // Latência de leitura: 95 % das requisições < 500 ms
-        "read_latency_ms{scenario:leitura_intensa}": ["p(95)<500"],
-        // Latência de escrita: 95 % das requisições < 1000 ms
-        "write_latency_ms{scenario:escrita_moderada}": ["p(95)<1000"],
-        // Latência de busca: 95 % das requisições < 800 ms
-        "search_latency_ms{scenario:busca_avancada}": ["p(95)<800"],
-        // Taxa de sucesso geral > 99 %
-        success_rate: ["rate>0.99"],
-        // Erros de escrita < 1 %
-        write_errors: ["count<10"],
+        // Leitura: 95% < 300ms mesmo sob stress máximo
+        "read_latency_ms": ["p(95)<300"],
+        "read_latency_ms{fase:stress}": ["p(95)<500"],
+        // Escrita: 95% < 800ms
+        "write_latency_ms": ["p(95)<800"],
+        // Busca JSONB: 95% < 600ms
+        "search_latency_ms": ["p(95)<600"],
+        // Taxa de sucesso geral > 98%
+        "success_rate": ["rate>0.98"],
+        // Erros de escrita: tolerância mínima
+        "write_errors": ["count<20"],
+        // HTTP: 99% das requisições com resposta
+        "http_req_failed": ["rate<0.02"],
+        // Latência geral HTTP p(99) < 1s
+        "http_req_duration": ["p(99)<1000"],
     },
 };
 
-// ─── Dados de exemplo (baseados em exemplo-computer-description.json) ────────
+// ─── Geração de payload ───────────────────────────────────────────────────────
 
-/**
- * Gera um payload de computador com nome único para evitar conflito de unique
- * constraint na coluna `name`.
- */
+const GPU_MODELS = [
+    "GeForce RTX 4090",
+    "GeForce RTX 4080 SUPER",
+    "GeForce RTX 4070 Ti GAMING X TRIO",
+    "GeForce RTX 3090 Ti",
+    "Radeon RX 7900 XTX",
+    "Radeon RX 7800 XT",
+    "GeForce RTX 3060 Ti",
+    "Intel Arc A770",
+];
+
+const RAM_CONFIGS = [16, 32, 64, 128];
+const STORAGE_SIZES = [512, 1000, 2000, 4000];
+const FABRICANTES_CASE = ["Corsair", "NZXT", "Lian Li", "Fractal Design", "be quiet!"];
+const SOCKETS = ["AM5", "AM4", "LGA1700", "LGA1851"];
+const CHIPSETS = ["X670E", "B650", "Z790", "Z890", "B760"];
+
 function gerarComputador() {
-    const sufixo = randomString(8);
-    const ramGb = [16, 32, 64][randomIntBetween(0, 2)];
-    const gpus = [
-        "GeForce RTX 4070 Ti GAMING X TRIO",
-        "GeForce RTX 4080 SUPER",
-        "Radeon RX 7900 XTX",
-        "GeForce RTX 3060 Ti",
-    ];
-    const gpu = gpus[randomIntBetween(0, gpus.length - 1)];
+    const id = randomString(10);
+    const ramGb = RAM_CONFIGS[randomIntBetween(0, RAM_CONFIGS.length - 1)];
+    const gpu = GPU_MODELS[randomIntBetween(0, GPU_MODELS.length - 1)];
+    const storage = STORAGE_SIZES[randomIntBetween(0, STORAGE_SIZES.length - 1)];
+    const socket = SOCKETS[randomIntBetween(0, SOCKETS.length - 1)];
+    const chipset = CHIPSETS[randomIntBetween(0, CHIPSETS.length - 1)];
+    const caseB = FABRICANTES_CASE[randomIntBetween(0, FABRICANTES_CASE.length - 1)];
 
     return {
-        name: `PC-${sufixo}`,
-        price: randomIntBetween(3000, 25000),
+        name: `PC-${id}`,
+        price: randomIntBetween(2500, 35000),
 
-        // ── fonte ──────────────────────────────────────────────────────────────
         fonte: {
-            modelo: "CX750M",
-            potencia_watts: 750,
-            certificacao: "80 Plus Bronze",
+            modelo: `RM${randomIntBetween(6, 12) * 100}x`,
+            potencia_watts: randomIntBetween(550, 1200),
+            certificacao: ["80 Plus Bronze", "80 Plus Gold", "80 Plus Platinum", "80 Plus Titanium"][randomIntBetween(0, 3)],
             modular: true,
-            fabricante: "Corsair",
+            fabricante: ["Corsair", "Seasonic", "be quiet!", "EVGA"][randomIntBetween(0, 3)],
         },
 
-        // ── placa_mae ──────────────────────────────────────────────────────────
         placa_mae: {
-            modelo: "ROG STRIX B550-F GAMING",
-            fabricante: "ASUS",
-            socket: "AM4",
-            chipset: "B550",
-            formato: "ATX",
+            modelo: `ROG STRIX ${chipset}-F GAMING WIFI`,
+            fabricante: ["ASUS", "MSI", "Gigabyte", "ASRock"][randomIntBetween(0, 3)],
+            socket: socket,
+            chipset: chipset,
+            formato: ["ATX", "Micro-ATX", "E-ATX"][randomIntBetween(0, 2)],
             slots_ram: 4,
-            ram_max_gb: 128,
-            slots_pcie: 3,
+            ram_max_gb: 256,
+            slots_pcie: randomIntBetween(2, 4),
         },
 
-        // ── placa_video ────────────────────────────────────────────────────────
         placa_video: {
             modelo: gpu,
-            fabricante: "MSI",
-            chipset: gpu.split(" ").slice(1, 4).join(" "),
-            memoria_gb: 12,
-            tipo_memoria: "GDDR6X",
-            clock_mhz: 2610,
-            tdp_watts: 285,
+            fabricante: ["MSI", "ASUS", "Gigabyte", "Sapphire", "PowerColor"][randomIntBetween(0, 4)],
+            chipset: gpu,
+            memoria_gb: randomIntBetween(8, 24),
+            tipo_memoria: ["GDDR6", "GDDR6X", "GDDR7"][randomIntBetween(0, 2)],
+            clock_mhz: randomIntBetween(2200, 2800),
+            tdp_watts: randomIntBetween(150, 450),
             interface: "PCIe 4.0 x16",
         },
 
-        // ── memoria_ram ────────────────────────────────────────────────────────
         memoria_ram: {
             modulos: [
                 {
-                    modelo: "Vengeance RGB Pro",
+                    modelo: "Dominator Platinum RGB",
                     fabricante: "Corsair",
                     capacidade_gb: ramGb / 2,
-                    tipo: "DDR4",
-                    frequencia_mhz: 3600,
-                    latencia: "CL18",
+                    tipo: ramGb >= 64 ? "DDR5" : "DDR4",
+                    frequencia_mhz: ramGb >= 64 ? randomIntBetween(5600, 7200) : randomIntBetween(3200, 4800),
+                    latencia: `CL${randomIntBetween(16, 40)}`,
                 },
                 {
-                    modelo: "Vengeance RGB Pro",
+                    modelo: "Dominator Platinum RGB",
                     fabricante: "Corsair",
                     capacidade_gb: ramGb / 2,
-                    tipo: "DDR4",
-                    frequencia_mhz: 3600,
-                    latencia: "CL18",
+                    tipo: ramGb >= 64 ? "DDR5" : "DDR4",
+                    frequencia_mhz: ramGb >= 64 ? randomIntBetween(5600, 7200) : randomIntBetween(3200, 4800),
+                    latencia: `CL${randomIntBetween(16, 40)}`,
                 },
             ],
             capacidade_total_gb: ramGb,
         },
 
-        // ── armazenamento ──────────────────────────────────────────────────────
         armazenamento: {
             dispositivos: [
                 {
-                    modelo: "980 PRO",
+                    modelo: "990 PRO",
                     fabricante: "Samsung",
                     tipo: "NVMe",
-                    capacidade_gb: 1000,
-                    interface: "NVMe PCIe 4.0",
-                    velocidade_leitura_mbps: 7000,
-                    velocidade_escrita_mbps: 5000,
+                    capacidade_gb: storage,
+                    interface: "NVMe PCIe 5.0",
+                    velocidade_leitura_mbps: randomIntBetween(6000, 14000),
+                    velocidade_escrita_mbps: randomIntBetween(4000, 12000),
                 },
                 {
                     modelo: "870 EVO",
                     fabricante: "Samsung",
                     tipo: "SSD",
-                    capacidade_gb: 2000,
+                    capacidade_gb: storage * 2,
                     interface: "SATA III",
                     velocidade_leitura_mbps: 560,
                     velocidade_escrita_mbps: 530,
                 },
             ],
-            capacidade_total_gb: 3000,
+            capacidade_total_gb: storage * 3,
         },
 
-        // ── gabinete ───────────────────────────────────────────────────────────
         gabinete: {
-            modelo: "4000D Airflow",
-            fabricante: "Corsair",
+            modelo: "O11 Dynamic EVO",
+            fabricante: caseB,
             tipo: "Mid Tower",
-            cor: "Preto",
-            material: "Aço com painel de vidro temperado",
-            tamanho_placa_mae_suportado: "ATX, Micro-ATX, Mini-ITX",
-            slots_expansao: 7,
+            cor: ["Preto", "Branco", "Cinza"][randomIntBetween(0, 2)],
+            material: "Alumínio com painel de vidro temperado",
+            tamanho_placa_mae_suportado: "E-ATX, ATX, Micro-ATX, Mini-ITX",
+            slots_expansao: 8,
             baias_35_polegadas: 2,
-            baias_25_polegadas: 2,
+            baias_25_polegadas: 4,
             ventilacao: {
-                coolers_inclusos: 2,
-                suporte_radiador: "360mm frontal, 280mm superior",
+                coolers_inclusos: 3,
+                suporte_radiador: "360mm frontal, 360mm lateral, 240mm traseiro",
                 slots_ventilacao_frontal: 3,
                 slots_ventilacao_superior: 3,
                 slots_ventilacao_traseira: 1,
             },
         },
 
-        observacoes: `Configuração para jogos em alta resolução e criação de conteúdo. Build ${sufixo}.`,
+        observacoes: `Build de alta performance para workloads de ${["gaming 4K", "criação de conteúdo", "machine learning", "streaming", "desenvolvimento"][randomIntBetween(0, 4)]}. ID: ${id}`,
     };
-}
-
-// ─── Cenário: Leitura (slave) ─────────────────────────────────────────────────
-
-export function cenarioLeitura() {
-    group("GET /computer — listar todos", () => {
-        const start = Date.now();
-        const res = http.get(ENDPOINT, { tags: { name: "list_all" } });
-        readLatency.add(Date.now() - start);
-
-        const ok = check(res, {
-            "status 200": (r) => r.status === 200,
-            "body é array": (r) => {
-                try {
-                    const body = JSON.parse(r.body);
-                    return Array.isArray(body);
-                } catch (_) {
-                    return false;
-                }
-            },
-        });
-
-        successRate.add(ok);
-        if (!ok) readErrors.add(1);
-    });
-
-    sleep(randomIntBetween(1, 3));
 }
 
 // ─── Cenário: Escrita (master) ────────────────────────────────────────────────
 
-export function cenarioEscrita() {
-    const computador = gerarComputador();
-    const payload = JSON.stringify(computador);
+export function escrever() {
+    const payload = JSON.stringify(gerarComputador());
     const headers = { "Content-Type": "application/json" };
 
-    let nomeParaDeletar = null;
+    const start = Date.now();
+    const res = http.post(ENDPOINT, payload, {
+        headers,
+        tags: { operacao: "insert" },
+        timeout: "10s",
+    });
+    writeLatency.add(Date.now() - start);
 
-    group("POST /computer — criar computador", () => {
-        const start = Date.now();
-        const res = http.post(ENDPOINT, payload, {
-            headers,
-            tags: { name: "create_computer" },
-        });
-        writeLatency.add(Date.now() - start);
-
-        const ok = check(res, {
-            "status 201": (r) => r.status === 201,
-            "body contém id": (r) => {
-                try {
-                    const body = JSON.parse(r.body);
-                    return body.id !== undefined;
-                } catch (_) {
-                    return false;
-                }
-            },
-        });
-
-        successRate.add(ok);
-        if (ok) {
-            nomeParaDeletar = computador.name;
-        } else {
-            writeErrors.add(1);
-        }
+    const ok = check(res, {
+        "insert: status 201": (r) => r.status === 201,
+        "insert: tem id": (r) => {
+            try { return JSON.parse(r.body).id !== undefined; }
+            catch (_) { return false; }
+        },
     });
 
-    // Aguarda replicação antes de deletar
-    sleep(randomIntBetween(1, 2));
+    successRate.add(ok);
+    if (ok) {
+        insertedCount.add(1);
+    } else {
+        writeErrors.add(1);
+    }
 
-    // Limpeza: remove o registro criado para não inflar o banco durante o teste
-    if (nomeParaDeletar) {
-        group(`DELETE /computer/${nomeParaDeletar} — remover computador criado`, () => {
-            const res = http.del(`${ENDPOINT}/${nomeParaDeletar}`, null, {
-                tags: { name: "delete_computer" },
+    // Sem sleep — máximo throughput de escrita
+}
+
+// ─── Cenário: Leitura simples (réplica) ──────────────────────────────────────
+
+export function ler() {
+    const start = Date.now();
+    const res = http.get(ENDPOINT, {
+        tags: { operacao: "select_all" },
+        timeout: "10s",
+    });
+    readLatency.add(Date.now() - start);
+
+    const ok = check(res, {
+        "select: status 200": (r) => r.status === 200,
+        "select: é array": (r) => {
+            try { return Array.isArray(JSON.parse(r.body)); }
+            catch (_) { return false; }
+        },
+        "select: tem dados": (r) => {
+            try { return JSON.parse(r.body).length > 0; }
+            catch (_) { return false; }
+        },
+    });
+
+    successRate.add(ok);
+    if (!ok) readErrors.add(1);
+
+    // Sem sleep — máximo throughput de leitura
+}
+
+// ─── Cenário: Leitura com busca JSONB (réplica) ───────────────────────────────
+
+const GPU_TERMOS = ["RTX", "RX", "GTX", "4090", "4080", "4070", "3090", "7900", "Arc"];
+const RAM_VALORES = [16, 32, 64, 128];
+
+export function lerComBusca() {
+    // Alterna entre listagem completa e buscas JSONB
+    const tipo = randomIntBetween(0, 2);
+
+    if (tipo === 0) {
+        // GET /computer — lista completa (maior volume de dados)
+        group("select_all", () => {
+            const start = Date.now();
+            const res = http.get(ENDPOINT, {
+                tags: { operacao: "select_all" },
+                timeout: "15s",
             });
+            readLatency.add(Date.now() - start);
 
             const ok = check(res, {
-                "status 204": (r) => r.status === 204,
+                "select_all: 200": (r) => r.status === 200,
+                "select_all: é array": (r) => {
+                    try { return Array.isArray(JSON.parse(r.body)); }
+                    catch (_) { return false; }
+                },
             });
-
             successRate.add(ok);
-            if (!ok) deleteErrors.add(1);
+            if (!ok) readErrors.add(1);
+        });
+
+    } else if (tipo === 1) {
+        // GET /computer/search/gpu/{termo} — busca JSONB por GPU
+        group("search_gpu", () => {
+            const termo = GPU_TERMOS[randomIntBetween(0, GPU_TERMOS.length - 1)];
+            const start = Date.now();
+            const res = http.get(`${ENDPOINT}/search/gpu/${termo}`, {
+                tags: { operacao: "search_gpu" },
+                timeout: "15s",
+            });
+            searchLatency.add(Date.now() - start);
+
+            const ok = check(res, {
+                "search_gpu: 200": (r) => r.status === 200,
+                "search_gpu: é array": (r) => {
+                    try { return Array.isArray(JSON.parse(r.body)); }
+                    catch (_) { return false; }
+                },
+            });
+            successRate.add(ok);
+            if (!ok) readErrors.add(1);
+        });
+
+    } else {
+        // GET /computer/search/ram/{capacidade} — busca JSONB por RAM
+        group("search_ram", () => {
+            const cap = RAM_VALORES[randomIntBetween(0, RAM_VALORES.length - 1)];
+            const start = Date.now();
+            const res = http.get(`${ENDPOINT}/search/ram/${cap}`, {
+                tags: { operacao: "search_ram" },
+                timeout: "15s",
+            });
+            searchLatency.add(Date.now() - start);
+
+            const ok = check(res, {
+                "search_ram: 200": (r) => r.status === 200,
+                "search_ram: é array": (r) => {
+                    try { return Array.isArray(JSON.parse(r.body)); }
+                    catch (_) { return false; }
+                },
+            });
+            successRate.add(ok);
+            if (!ok) readErrors.add(1);
         });
     }
 
-    sleep(randomIntBetween(1, 3));
-}
-
-// ─── Cenário: Busca avançada (JSONB na réplica) ───────────────────────────────
-
-export function cenarioBusca() {
-    const gpuTermos = ["RTX", "RX", "GTX", "4070", "3060", "7900"];
-    const ramCapacidades = [16, 32, 64];
-
-    group("GET /computer/search/gpu — busca por GPU", () => {
-        const termo = gpuTermos[randomIntBetween(0, gpuTermos.length - 1)];
-        const start = Date.now();
-        const res = http.get(`${ENDPOINT}/search/gpu/${termo}`, {
-            tags: { name: "search_gpu" },
-        });
-        searchLatency.add(Date.now() - start);
-
-        const ok = check(res, {
-            "status 200": (r) => r.status === 200,
-            "body é array": (r) => {
-                try {
-                    return Array.isArray(JSON.parse(r.body));
-                } catch (_) {
-                    return false;
-                }
-            },
-        });
-
-        successRate.add(ok);
-        if (!ok) readErrors.add(1);
-    });
-
-    sleep(randomIntBetween(1, 2));
-
-    group("GET /computer/search/ram — busca por capacidade de RAM", () => {
-        const capacidade = ramCapacidades[randomIntBetween(0, ramCapacidades.length - 1)];
-        const start = Date.now();
-        const res = http.get(`${ENDPOINT}/search/ram/${capacidade}`, {
-            tags: { name: "search_ram" },
-        });
-        searchLatency.add(Date.now() - start);
-
-        const ok = check(res, {
-            "status 200": (r) => r.status === 200,
-            "body é array": (r) => {
-                try {
-                    return Array.isArray(JSON.parse(r.body));
-                } catch (_) {
-                    return false;
-                }
-            },
-        });
-
-        successRate.add(ok);
-        if (!ok) readErrors.add(1);
-    });
-
-    sleep(randomIntBetween(1, 3));
+    // Sem sleep — máximo throughput
 }

@@ -1,6 +1,5 @@
 package org.acme.computers;
 
-import io.quarkus.hibernate.reactive.panache.Panache;
 import io.smallrye.mutiny.Uni;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -15,6 +14,8 @@ import java.util.List;
 
 @Path("computer")
 @ApplicationScoped
+@Produces(MediaType.APPLICATION_JSON)
+@Consumes(MediaType.APPLICATION_JSON)
 public class ComputersResource {
 
     @Inject
@@ -23,35 +24,48 @@ public class ComputersResource {
     @Inject
     ComputerWriteService writeService;
 
+    /**
+     * Lista todos os computadores — leitura via RÉPLICA (slave).
+     */
     @GET
-    public Uni<List<ComputerEntity>> get() {
-        return readService.streamAll().collect().asList();
+    public Uni<List<ComputerEntity>> getAll() {
+        return readService.findAll();
     }
 
+    /**
+     * Cria um novo computador — escrita via PRIMARY (master).
+     */
     @POST
-    @Consumes(MediaType.APPLICATION_JSON)
-    @Produces(MediaType.APPLICATION_JSON)
     public Uni<RestResponse<ComputerEntity>> create(ComputerDescriptionDTO dto) {
-        return Panache.withTransaction(() -> writeService.create(dto))
+        return writeService.create(dto)
                 .map(entity -> RestResponse.status(RestResponse.Status.CREATED, entity));
     }
 
+    /**
+     * Busca computadores por modelo de GPU — leitura via RÉPLICA.
+     */
     @GET
     @Path("search/gpu/{search}")
     public Uni<List<ComputerEntity>> searchGPU(@PathParam("search") String search) {
         return readService.searchByGpu(search);
     }
 
+    /**
+     * Busca computadores por capacidade de RAM — leitura via RÉPLICA.
+     */
     @GET
     @Path("search/ram/{capacity}")
     public Uni<List<ComputerEntity>> searchRAM(@PathParam("capacity") Integer capacity) {
         return readService.searchByRamCapacity(capacity);
     }
 
+    /**
+     * Remove um computador pelo nome — escrita via PRIMARY (master).
+     */
     @DELETE
     @Path("{name}")
     public Uni<RestResponse<Void>> delete(@PathParam("name") String name) {
-        return Panache.withTransaction(() -> writeService.deleteByName(name))
+        return writeService.deleteByName(name)
                 .map(deleted -> deleted > 0
                         ? RestResponse.noContent()
                         : RestResponse.status(RestResponse.Status.NOT_FOUND));
