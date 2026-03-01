@@ -1,0 +1,15 @@
+# Override para rodar a API em modo JVM em vez de nativo.
+#
+# Uso:
+#   docker compose -f docker-compose.yaml -f docker-compose.jvm.yaml up --build
+services:
+  quarkus-api:
+    build:
+      context: .
+      dockerfile: src/main/docker/Dockerfile.jvm-multistage
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+        reservations:
+          memory: 256m

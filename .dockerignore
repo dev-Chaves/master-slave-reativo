@@ -1,5 +1,11 @@
-escreesc*
+**
+# JVM / pre-built native
 !target/*-runner
 !target/*-runner.jar
 !target/lib/*
-!target/quarkus-app/*
+!target/quarkus-app/**
+# Multi-stage native build (fontes necessários para compilar dentro do Docker)
+!src/
+!pom.xml
+!mvnw
+!.mvn/

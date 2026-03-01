@@ -64,12 +64,12 @@ services:
       retries: 15
 
   # =========================================================
-  # QUARKUS API (JVM MODE)
+  # QUARKUS API (NATIVE MODE)
   # =========================================================
   quarkus-api:
     build:
       context: .
-      dockerfile: src/main/docker/Dockerfile.jvm
+      dockerfile: src/main/docker/Dockerfile.native-multistage
     container_name: quarkus-api
     restart: on-failure
     depends_on:
@@ -91,9 +91,9 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1024m
+          memory: 128m
         reservations:
-          memory: 256m
+          memory: 32m
     networks:
       - quarkus-net
     healthcheck:
