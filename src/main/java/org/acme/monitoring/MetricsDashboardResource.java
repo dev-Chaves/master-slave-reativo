@@ -1,18 +1,21 @@
 package org.acme.monitoring;
 
+import io.smallrye.mutiny.Multi;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.core.MediaType;
+import org.jboss.resteasy.reactive.RestStreamElementType;
 
 import java.util.List;
 
 /**
  * Dashboard SSR — Scheduled Service Report.
  *
- * GET /ssr       → Página HTML com gráficos Chart.js (atualiza a cada 30s)
- * GET /ssr/data  → JSON com os últimos snapshots coletados
+ * GET /ssr        → Página HTML com gráficos Chart.js (atualiza via SSE)
+ * GET /ssr/data   → JSON com os últimos snapshots coletados
+ * GET /ssr/stream → SSE — push de cada novo snapshot em tempo real
  */
 @Path("/ssr")
 public class MetricsDashboardResource {
@@ -42,12 +45,13 @@ public class MetricsDashboardResource {
                     canvas { max-height: 260px; }
                     .badge { display: inline-block; margin-left: 8px; font-size: 0.7rem;
                              background: #334155; padding: 2px 8px; border-radius: 99px; color: #94a3b8; }
+                    .live { background: #052e16; color: #4ade80; }
                     @media (max-width: 700px) { .grid { grid-template-columns: 1fr; } }
                   </style>
                 </head>
                 <body>
-                  <h1>SSR — Scheduled Service Report <span class="badge">30s refresh</span></h1>
-                  <p class="sub">Métricas do Master (primary) e Slave (leitura) • últimos 20 snapshots</p>
+                  <h1>SSR — Scheduled Service Report <span class="badge live">⬤ live</span></h1>
+                  <p class="sub">Métricas do Master (primary) e Slave (leitura) • últimos 20 snapshots • atualização via SSE</p>
                   <div class="grid">
                     <div class="card">
                       <h2>🌐 Requisições HTTP — Reads vs Writes</h2>
@@ -102,42 +106,47 @@ public class MetricsDashboardResource {
                       return ts ? ts.substring(11, 19) : '';
                     }
 
-                    async function refresh() {
-                      try {
-                        const res = await fetch('/ssr/data');
-                        const data = await res.json();
-                        const labels = data.map(s => shortTs(s.timestamp));
+                    // Carrega histórico inicial via REST
+                    fetch('/ssr/data')
+                      .then(r => r.json())
+                      .then(applyAll)
+                      .catch(e => console.error('SSR initial load error', e));
 
-                        function sync(chart, ...series) {
-                          chart.data.labels = labels;
-                          series.forEach((vals, i) => chart.data.datasets[i].data = vals);
-                          chart.update('none');
-                        }
-
-                        sync(httpChart,
-                          data.map(s => s.httpReads),
-                          data.map(s => s.httpWrites));
-
-                        sync(poolInChart,
-                          data.map(s => s.primaryPoolInUse),
-                          data.map(s => s.replicaPoolInUse));
-
-                        sync(poolPendChart,
-                          data.map(s => s.primaryPoolPending),
-                          data.map(s => s.replicaPoolPending));
-
-                        const last = data[data.length - 1];
-                        if (last) {
-                          document.getElementById('lastSnapshot').textContent =
-                            JSON.stringify(last, null, 2);
-                        }
-                      } catch(e) {
-                        console.error('SSR refresh error', e);
+                    function applyAll(data) {
+                      const labels = data.map(s => shortTs(s.timestamp));
+                      function sync(chart, ...series) {
+                        chart.data.labels = labels;
+                        series.forEach((vals, i) => chart.data.datasets[i].data = vals);
+                        chart.update('none');
                       }
+                      sync(httpChart,   data.map(s => s.httpReads), data.map(s => s.httpWrites));
+                      sync(poolInChart,  data.map(s => s.primaryPoolInUse), data.map(s => s.replicaPoolInUse));
+                      sync(poolPendChart, data.map(s => s.primaryPoolPending), data.map(s => s.replicaPoolPending));
+                      const last = data[data.length - 1];
+                      if (last) document.getElementById('lastSnapshot').textContent = JSON.stringify(last, null, 2);
                     }
 
-                    refresh();
-                    setInterval(refresh, 30000);
+                    // SSE: recebe push de cada novo snapshot do servidor
+                    const es = new EventSource('/ssr/stream');
+                    es.onmessage = (event) => {
+                      const s = JSON.parse(event.data);
+                      [httpChart, poolInChart, poolPendChart].forEach(chart => {
+                        if (chart.data.labels.length >= 20) {
+                          chart.data.labels.shift();
+                          chart.data.datasets.forEach(ds => ds.data.shift());
+                        }
+                        chart.data.labels.push(shortTs(s.timestamp));
+                      });
+                      httpChart.data.datasets[0].data.push(s.httpReads);
+                      httpChart.data.datasets[1].data.push(s.httpWrites);
+                      poolInChart.data.datasets[0].data.push(s.primaryPoolInUse);
+                      poolInChart.data.datasets[1].data.push(s.replicaPoolInUse);
+                      poolPendChart.data.datasets[0].data.push(s.primaryPoolPending);
+                      poolPendChart.data.datasets[1].data.push(s.replicaPoolPending);
+                      [httpChart, poolInChart, poolPendChart].forEach(c => c.update('none'));
+                      document.getElementById('lastSnapshot').textContent = JSON.stringify(s, null, 2);
+                    };
+                    es.onerror = () => console.warn('SSE connection lost, reconnecting...');
                   </script>
                 </body>
                 </html>
@@ -149,5 +158,13 @@ public class MetricsDashboardResource {
     @Produces(MediaType.APPLICATION_JSON)
     public List<MetricsSnapshot> data() {
         return store.getAll();
+    }
+
+    @GET
+    @Path("/stream")
+    @Produces(MediaType.SERVER_SENT_EVENTS)
+    @RestStreamElementType(MediaType.APPLICATION_JSON)
+    public Multi<MetricsSnapshot> stream() {
+        return store.stream();
     }
 }
