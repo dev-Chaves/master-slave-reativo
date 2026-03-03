@@ -21,7 +21,7 @@ public class MetricsCollectorJob {
     @Inject
     MetricsStore store;
 
-    @Scheduled(every = "30s", identity = "ssr-metrics-collector")
+    @Scheduled(every = "5s", identity = "ssr-metrics-collector")
     void collect() {
         double httpReads = sumHttpRequests("GET");
         double httpWrites = sumHttpRequests("POST") + sumHttpRequests("DELETE") + sumHttpRequests("PUT");
